@@ -290,7 +290,7 @@ Available tools:
 - diff_preview: Preview changes before applying
 - restore_backup: Restore files from .bak backups
 - list_backups: Find all backup files
-- help: This help system
+- smalledit_help: This help system
 
 🎯 WHEN TO USE SMALLEDIT vs FILESYSTEM TOOLS:
 ==========================================
