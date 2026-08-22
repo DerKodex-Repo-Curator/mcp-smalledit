@@ -263,7 +263,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
-        name: 'help',
+        name: 'smalledit_help',
         description: 'Get comprehensive documentation for all smalledit functions',
         inputSchema: {
           type: 'object',
@@ -787,7 +787,7 @@ ${content}' '${file}'`;
         };
       }
       
-      case 'help': {
+      case 'smalledit_help': {
         const { tool = 'all' } = args;
         
         const helpKey = tool === 'all' ? 'overview' : tool;
@@ -888,7 +888,7 @@ ${content}' '${file}'`;
         };
       }
       
-      case 'help': {
+      case 'smalledit_help': {
         // Use the existing comprehensive help system
         const allHelp = Object.values(helpContent).join('\n\n');
         const overviewHelp = `
