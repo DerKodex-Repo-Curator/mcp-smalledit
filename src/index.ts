@@ -15,7 +15,7 @@ import {
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { readFile, writeFile } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 
 const execAsync = promisify(exec);
 
@@ -275,7 +275,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 // Help content for each tool
-const helpContent = {
+const helpContent: Record<string, string> = {
   overview: `SmallEdit MCP Tool - Help
 ========================
 Provides efficient tools for small, targeted file edits.
@@ -549,7 +549,49 @@ Useful for cleanup or finding old versions.
 
 // Tool implementation handler
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+// --- report what ACTUALLY happened, not that the command ran ------------------
+//
+// Every edit tool here used to run its command and return "Successfully edited"
+// unconditionally. Measured 2026-08-22: calling perl_edit with the wrong argument
+// name gave an undefined script, perl ran as a no-op, the file was untouched, and
+// the tool reported success with a straight face.
+//
+// That matters more here than in most servers. The reason to prefer a stream editor
+// over a model rewriting a file is that a stream editor cannot add anything or drop
+// anything outside the edit radius. A tool with that property that LIES about
+// whether it edited is worse than no tool, because the guarantee is the whole point.
+//
+// So: read before, read after, and say which happened.
+function readOrNull(f: string): string | null {
+  try { return readFileSync(f, 'utf8'); } catch { return null; }
+}
+function changeReport(file: string, before: string | null, what: string, backup: boolean): string {
+  const after = readOrNull(file);
+  if (after === null) return `${what}: ${file} could not be read back after the edit.`;
+  if (before === null) return `${what}: ${file} (could not be read before the edit, so no comparison).`;
+  if (after === before) {
+    return `NO CHANGE — ${file} is byte-identical after ${what}. The pattern matched nothing. ` +
+           `This is reported rather than called success, because a no-op that claims to have ` +
+           `edited is the failure this tool exists to avoid.`;
+  }
+  const b = before.split('\n'), a = after.split('\n');
+  let touched = 0;
+  for (let i = 0; i < Math.max(b.length, a.length); i++) if (b[i] !== a[i]) touched++;
+  return `Edited ${file} with ${what}: ${touched} line${touched === 1 ? '' : 's'} differ, ` +
+         `${b.length} -> ${a.length} lines${backup ? ' (backup created as .bak)' : ''}.`;
+}
+
+
+  const { name, arguments: rawArgs } = request.params;
+  // MCP delivers tool arguments as Record<string, unknown> | undefined, so under
+  // `strict` every handler below that destructures its own declared fields failed to
+  // compile -- 32 of the 35 errors that had this server's build emitting nothing.
+  //
+  // Widened once, here, rather than as ten per-tool interfaces. Each tool already
+  // declares its arguments in its inputSchema, and that schema is the contract the
+  // client validates against; duplicating it in TypeScript would give two contracts
+  // that can drift, which is the failure this whole codebase keeps finding.
+  const args = (rawArgs ?? {}) as Record<string, any>;
   
   try {
     switch (name) {
@@ -620,7 +662,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             await execAsync(sedCmd);
             results.push(`✓ ${file}`);
           } catch (error) {
-            results.push(`✗ ${file}: ${error.message}`);
+            // catch params are `unknown` under strict. Narrow rather than casting to
+            // any, so a thrown non-Error still reports something useful.
+            results.push(`✗ ${file}: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
         
@@ -731,7 +775,15 @@ ${content}' '${file}'`;
         if (!existsSync(file)) {
           throw new Error(`File not found: ${file}`);
         }
+        if (typeof script !== 'string' || !script.trim()) {
+          // Was the exact silent success: a missing script ran perl as a no-op and
+          // still reported "Successfully edited".
+          throw new Error(
+            `perl_edit needs a \`script\` (its inputSchema declares script, not command). ` +
+            `Got: ${JSON.stringify(script)}`);
+        }
         
+        const before = readOrNull(file);
         const backupExt = backup ? '.bak' : '';
         const multilineFlag = multiline ? '-0777 ' : '';
         const perlCmd = `perl -i${backupExt} ${multilineFlag}-pe '${script}' '${file}'`;
@@ -739,10 +791,7 @@ ${content}' '${file}'`;
         await execAsync(perlCmd);
         
         return {
-          content: [{
-            type: 'text',
-            text: `Successfully edited ${file} using Perl${backup ? ' (backup created as .bak)' : ''}`
-          }]
+          content: [{ type: 'text', text: changeReport(file, before, 'Perl', backup) }]
         };
       }
       
@@ -758,7 +807,7 @@ ${content}' '${file}'`;
         await execAsync(`rm -f .bak; cp '${file}' '${tempFile}'`);
         
         // Apply command to temp file
-        let editCmd;
+        let editCmd: string;
         switch (tool) {
           case 'perl':
             editCmd = `perl -i -pe '${command}' '${tempFile}'`;
@@ -769,6 +818,13 @@ ${content}' '${file}'`;
           case 'awk':
             editCmd = `awk '${command}' '${tempFile}' > '${tempFile}.new' && mv '${tempFile}.new' '${tempFile}'`;
             break;
+          default:
+            // Was a REAL HOLE, not a type complaint: editCmd stayed undefined for any
+            // unrecognised tool and was handed straight to the shell. Refuse by name
+            // instead, and clean up the temp file rather than leaving it behind.
+            await execAsync(`rm -f '${tempFile}'`).catch(() => {});
+            throw new Error(
+              `Unknown tool "${tool}" for diff_preview. Use one of: perl, sed, awk.`);
         }
         
         await execAsync(editCmd);
